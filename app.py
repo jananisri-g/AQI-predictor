@@ -3,7 +3,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import numpy as np
-from model import predict_aqi, suggest_precautions, get_actual_vs_predicted
+from datetime import date, time
+from model import predict_aqi, suggest_precautions, get_actual_vs_predicted, LOCATION_FILES
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -26,17 +27,22 @@ AQI_BANDS = [
     (500, "#C08497", "Severe"),
 ]
 
+LOCATION_LIST = list(LOCATION_FILES.keys())   # ["Delhi", "Bengaluru"]
+
+
 def get_aqi_color(aqi):
     for threshold, color, _ in AQI_BANDS:
         if aqi <= threshold:
             return color
     return "#C08497"
 
+
 def get_aqi_label(aqi):
     for threshold, _, label in AQI_BANDS:
         if aqi <= threshold:
             return label
     return "Severe"
+
 
 def normalise_precautions(precautions):
     """Accept dict or legacy flat list, always return dict."""
@@ -57,6 +63,7 @@ def normalise_precautions(precautions):
             if clean:
                 prec_dict.setdefault(current_group, []).append(clean)
     return prec_dict
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
@@ -86,45 +93,99 @@ with st.sidebar:
     st.divider()
     st.caption("Final Year Project · 2025")
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE 1 — PREDICTION
 # ──────────────────────────────────────────────────────────────────────────────
 if "Prediction" in page:
 
     st.title("🌫️ AQI Prediction & Health Advisory")
-    st.write("Enter a datetime to predict the Air Quality Index and receive group-specific health recommendations.")
+    st.write(
+        "Select a **location**, pick a **date** from the calendar, choose the **hour**, "
+        "then click **Predict AQI** to receive group-specific health recommendations."
+    )
     st.divider()
 
-    col_input, col_btn = st.columns([3, 1])
-    with col_input:
-        datetime_input = st.text_input(
-            "Datetime (YYYY-MM-DD HH:MM:SS)",
-            "2025-01-20 15:00:00",
+    # ── Input row ─────────────────────────────────────────────────────────────
+    col_loc, col_date, col_hour, col_btn = st.columns([1.5, 2, 1.5, 1])
+
+    with col_loc:
+        st.markdown("**📍 Location**")
+        selected_location = st.selectbox(
+            "Location",
+            options=LOCATION_LIST,
+            index=0,
+            label_visibility="collapsed",
         )
+
+    with col_date:
+        st.markdown("**📅 Date**")
+        selected_date = st.date_input(
+            "Date",
+            value=date(2025, 1, 20),
+            label_visibility="collapsed",
+        )
+
+    with col_hour:
+        st.markdown("**🕐 Hour of Day**")
+        # Clock-style slider — 0–23 with AM/PM display
+        selected_hour = st.slider(
+            "Hour",
+            min_value=0,
+            max_value=23,
+            value=15,
+            format="%d:00",
+            label_visibility="collapsed",
+        )
+        # Human-readable AM/PM label
+        hour_label = (
+            "12:00 noon" if selected_hour == 12
+            else f"{selected_hour}:00 {'AM' if selected_hour < 12 else 'PM'}"
+        )
+        st.markdown(
+            f"<div style='text-align:center;font-size:1.05rem;font-weight:600;"
+            f"color:#6366f1;margin-top:4px'>🕐 {hour_label}</div>",
+            unsafe_allow_html=True,
+        )
+
     with col_btn:
-        st.write("")
+        st.markdown("&nbsp;")   # vertical alignment spacer
+        st.markdown("&nbsp;")
         predict_clicked = st.button("🔍 Predict AQI", use_container_width=True)
 
+    # ── Assembled datetime preview ─────────────────────────────────────────────
+    assembled_dt = f"{selected_date} {selected_hour:02d}:00:00"
+    st.markdown(
+        f"<div style='margin:8px 0 16px 0; padding:10px 16px; background:#f1f5f9; "
+        f"border-radius:8px; font-size:0.9rem; color:#475569;'>"
+        f"🗓️ <b>Selected:</b> &nbsp; {selected_location} &nbsp;·&nbsp; "
+        f"{selected_date.strftime('%A, %d %B %Y')} &nbsp;·&nbsp; {hour_label}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Prediction ─────────────────────────────────────────────────────────────
     if predict_clicked:
-        with st.spinner("Running prediction..."):
+        with st.spinner(f"Running prediction for {selected_location}…"):
             try:
-                predicted_aqi = predict_aqi(datetime_input)
+                predicted_aqi = predict_aqi(assembled_dt, location=selected_location)
                 category, precautions = suggest_precautions(predicted_aqi)
                 color = get_aqi_color(predicted_aqi)
 
                 # ── KPI metrics ───────────────────────────────────────────────
                 st.divider()
-                k1, k2, k3 = st.columns(3)
-                k1.metric("Predicted AQI", f"{round(predicted_aqi, 2)}")
-                k2.metric("Category", category)
-                k3.metric("Risk Level", get_aqi_label(predicted_aqi))
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("📍 Location",    selected_location)
+                k2.metric("Predicted AQI",  f"{round(predicted_aqi, 2)}")
+                k3.metric("Category",        category)
+                k4.metric("Risk Level",      get_aqi_label(predicted_aqi))
 
                 # ── Gauge ─────────────────────────────────────────────────────
                 st.subheader("AQI Gauge")
                 fig_gauge = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=predicted_aqi,
-                    title={"text": "Air Quality Index", "font": {"size": 20}},
+                    title={"text": f"Air Quality Index — {selected_location}", "font": {"size": 18}},
                     number={"font": {"size": 48, "color": color}},
                     gauge={
                         "axis": {
@@ -154,7 +215,7 @@ if "Prediction" in page:
                 )
                 st.plotly_chart(fig_gauge, use_container_width=True)
 
-                # ── Health Risk Bar (Plotly) ───────────────────────────────────
+                # ── Health Risk Bar ───────────────────────────────────────────
                 st.subheader("Health Risk Breakdown")
                 risk_labels = ["Safe Margin", "Moderate Risk", "High Risk"]
                 risk_values = [
@@ -204,6 +265,7 @@ if "Prediction" in page:
             except Exception as e:
                 st.error(f"Prediction error: {e}")
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE 2 — MODEL PERFORMANCE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -213,21 +275,27 @@ elif "Performance" in page:
     st.write("Evaluation of the XGBoost model on the held-out test set (last 20% of data).")
     st.divider()
 
-    with st.spinner("Loading model results..."):
+    # Location selector for performance page
+    perf_location = st.selectbox(
+        "Select location to evaluate:",
+        options=LOCATION_LIST,
+        index=0,
+    )
+
+    with st.spinner(f"Loading model results for {perf_location}…"):
         try:
             from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-            actual, predicted = get_actual_vs_predicted()
+            actual, predicted = get_actual_vs_predicted(location=perf_location)
 
             mae  = mean_absolute_error(actual, predicted)
             rmse = np.sqrt(mean_squared_error(actual, predicted))
             r2   = r2_score(actual, predicted)
             mape = np.mean(np.abs((actual - predicted) / np.where(actual == 0, 1, actual))) * 100
 
-            # ── Metrics row ───────────────────────────────────────────────────
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("MAE",  f"{mae:.2f}",   help="Mean Absolute Error — lower is better")
-            m2.metric("RMSE", f"{rmse:.2f}",  help="Root Mean Squared Error — penalises large errors more")
+            m2.metric("RMSE", f"{rmse:.2f}",  help="Root Mean Squared Error")
             m3.metric("R²",   f"{r2:.4f}",    help="Coefficient of determination — closer to 1.0 is better")
             m4.metric("MAPE", f"{mape:.2f}%", help="Mean Absolute Percentage Error")
 
@@ -278,7 +346,7 @@ elif "Performance" in page:
                 yaxis=dict(showgrid=True, gridcolor="#e5e7eb"),
             )
             st.plotly_chart(fig_hist, use_container_width=True)
-            st.caption("A residuals distribution centred near zero indicates low systematic bias in the model.")
+            st.caption("A residuals distribution centred near zero indicates low systematic bias.")
 
             # ── Scatter: Actual vs Predicted ──────────────────────────────────
             st.subheader("Prediction Accuracy Scatter")
@@ -309,6 +377,7 @@ elif "Performance" in page:
         except Exception as e:
             st.error(f"Error loading model data: {e}")
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE 3 — METHODOLOGY / ABOUT
 # ──────────────────────────────────────────────────────────────────────────────
@@ -319,19 +388,27 @@ elif "Methodology" in page:
 
     st.subheader("Project Overview")
     st.write(
-        "This system predicts the Air Quality Index (AQI) at a given datetime using a "
-        "machine learning model trained on historical AQI observations. Based on the predicted "
-        "AQI, the system provides evidence-based health recommendations tailored to different "
-        "population groups including children, elderly individuals, pregnant women, athletes, "
-        "and patients with chronic respiratory or cardiovascular conditions."
+        "This system predicts the Air Quality Index (AQI) at a given datetime and location "
+        "using a machine learning model trained on historical AQI observations. Based on the "
+        "predicted AQI, the system provides evidence-based health recommendations tailored to "
+        "different population groups including children, elderly individuals, pregnant women, "
+        "athletes, and patients with chronic respiratory or cardiovascular conditions."
     )
+
+    st.divider()
+    st.subheader("Supported Locations")
+    loc_data = {
+        "City":        list(LOCATION_FILES.keys()),
+        "Data File":   list(LOCATION_FILES.values()),
+    }
+    st.dataframe(pd.DataFrame(loc_data), use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Dataset")
     col_d1, col_d2 = st.columns(2)
     with col_d1:
         st.markdown("**Source**")
-        st.write("Historical AQI readings stored in `project_dataset.xlsx`")
+        st.write("Historical AQI readings stored per city in `.xlsx` files.")
         st.markdown("**Format**")
         st.write(
             "Wide format — rows are dates, columns are hourly time slots. "
@@ -389,6 +466,7 @@ elif "Methodology" in page:
         st.markdown("**Algorithm:** XGBoost Regressor")
         st.markdown("**Train/Test Split:** 80% / 20% (chronological)")
         st.markdown("**Evaluation Metrics:** MAE, RMSE, R², MAPE")
+        st.markdown("**Model Caching:** Each city's model is trained once and cached.")
     with col_m2:
         st.markdown("**Hyperparameters**")
         for k, v in {
@@ -439,4 +517,4 @@ elif "Methodology" in page:
         st.markdown("• Plotly\n• Streamlit")
     with t3:
         st.markdown("**Environment**")
-        st.markdown("• Python 3.x\n• Streamlit web app\n• Excel dataset (.xlsx)")
+        st.markdown("• Python 3.x\n• Streamlit web app\n• Excel datasets (.xlsx) per city")
