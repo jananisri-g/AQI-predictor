@@ -3,41 +3,53 @@ import numpy as np
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.multioutput import MultiOutputClassifier
-from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import mean_absolute_error
 import warnings
 warnings.filterwarnings("ignore")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SECTION 1 — AQI TIME-SERIES DATA & FEATURE ENGINEERING
+# SECTION 0 — LOCATION → DATASET MAPPING
 # ──────────────────────────────────────────────────────────────────────────────
 
-file_path = "delhi_data.xlsx"
-df = pd.read_excel(file_path)
+LOCATION_FILES = {
+    "Delhi":     "delhi_data.xlsx",
+    "Bengaluru": "bengaluru_data.xlsx",
+}
 
-df_long = df.melt(id_vars=["Date"], var_name="Time", value_name="AQI")
-df_long["Time"] = df_long["Time"].astype(str)
-df_long["Datetime"] = pd.to_datetime(df_long["Date"].astype(str) + " " + df_long["Time"])
-df_long = df_long.sort_values("Datetime").reset_index(drop=True)
-df_long["AQI"] = pd.to_numeric(df_long["AQI"], errors="coerce")
-df_long = df_long.dropna()
+# Cache trained models per location so re-selecting doesn't re-train every time
+_model_cache = {}
 
-df_long["hour"]       = df_long["Datetime"].dt.hour
-df_long["day"]        = df_long["Datetime"].dt.day
-df_long["dayofweek"]  = df_long["Datetime"].dt.dayofweek
 
-df_long["lag1"]  = df_long["AQI"].shift(1)
-df_long["lag2"]  = df_long["AQI"].shift(2)
-df_long["lag24"] = df_long["AQI"].shift(24)
-df_long["lag48"] = df_long["AQI"].shift(48)
-df_long["lag72"] = df_long["AQI"].shift(72)
+def _load_and_prepare(file_path: str):
+    """Load an AQI Excel file, melt to long format, engineer features."""
+    df = pd.read_excel(file_path)
+    df_long = df.melt(id_vars=["Date"], var_name="Time", value_name="AQI")
+    df_long["Time"] = df_long["Time"].astype(str)
+    df_long["Datetime"] = pd.to_datetime(
+        df_long["Date"].astype(str) + " " + df_long["Time"]
+    )
+    df_long = df_long.sort_values("Datetime").reset_index(drop=True)
+    df_long["AQI"] = pd.to_numeric(df_long["AQI"], errors="coerce")
+    df_long = df_long.dropna()
 
-df_long["rolling_mean_3"]  = df_long["AQI"].rolling(3).mean()
-df_long["rolling_mean_6"]  = df_long["AQI"].rolling(6).mean()
-df_long["rolling_mean_12"] = df_long["AQI"].rolling(12).mean()
+    df_long["hour"]      = df_long["Datetime"].dt.hour
+    df_long["day"]       = df_long["Datetime"].dt.day
+    df_long["dayofweek"] = df_long["Datetime"].dt.dayofweek
 
-df_long = df_long.dropna().reset_index(drop=True)
+    df_long["lag1"]  = df_long["AQI"].shift(1)
+    df_long["lag2"]  = df_long["AQI"].shift(2)
+    df_long["lag24"] = df_long["AQI"].shift(24)
+    df_long["lag48"] = df_long["AQI"].shift(48)
+    df_long["lag72"] = df_long["AQI"].shift(72)
+
+    df_long["rolling_mean_3"]  = df_long["AQI"].rolling(3).mean()
+    df_long["rolling_mean_6"]  = df_long["AQI"].rolling(6).mean()
+    df_long["rolling_mean_12"] = df_long["AQI"].rolling(12).mean()
+
+    df_long = df_long.dropna().reset_index(drop=True)
+    return df_long
+
 
 FEATURES = [
     "hour", "day", "dayofweek",
@@ -45,47 +57,50 @@ FEATURES = [
     "rolling_mean_3", "rolling_mean_6", "rolling_mean_12",
 ]
 
-X = df_long[FEATURES]
-y = df_long["AQI"]
 
-split_index = int(len(X) * 0.8)
-X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
-y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
+def _train_aqi_model(df_long):
+    """Train and return (model, X_test, y_test, preds) for a prepared DataFrame."""
+    X = df_long[FEATURES]
+    y = df_long["AQI"]
 
-# ── XGBoost AQI Regressor ─────────────────────────────────────────────────────
-aqi_model = XGBRegressor(
-    n_estimators=100,
-    learning_rate=0.05,
-    max_depth=6,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    random_state=42,
-    tree_method="hist",
-)
-aqi_model.fit(X_train, y_train)
+    split_index = int(len(X) * 0.8)
+    X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+    y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
 
-preds = aqi_model.predict(X_test)
-mae   = mean_absolute_error(y_test, preds)
-print(f"AQI Model — Mean Absolute Error: {mae:.4f}")
+    model = XGBRegressor(
+        n_estimators=100,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42,
+        tree_method="hist",
+    )
+    model.fit(X_train, y_train)
+    preds = model.predict(X_test)
+    mae   = mean_absolute_error(y_test, preds)
+    print(f"[{df_long['Datetime'].iloc[0].year}] AQI Model MAE: {mae:.4f}")
+    return model, X_test, y_test, preds
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SECTION 1 — DEFAULT MODEL (Delhi) — loaded at import for backward compat
+# ──────────────────────────────────────────────────────────────────────────────
+
+_default_location = "Delhi"
+_df_long   = _load_and_prepare(LOCATION_FILES[_default_location])
+_aqi_model, _X_test, _y_test, _preds = _train_aqi_model(_df_long)
+
+# expose module-level names that app.py may import directly (legacy compat)
+df_long   = _df_long
+aqi_model = _aqi_model
+y_test    = _y_test
+preds     = _preds
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SECTION 2 — MULTI-LABEL RECOMMENDATION ENGINE
 # ──────────────────────────────────────────────────────────────────────────────
-#
-# Design:
-#   • Each population group has its own dedicated MultiOutputClassifier
-#     (RandomForest) that predicts which advice items apply at a given AQI.
-#   • Training data is synthetically generated from the same domain-expert
-#     rules that previously lived in the if/elif block — this is standard
-#     practice when labelled recommendation data is unavailable.
-#   • The model learns a continuous mapping: AQI (float) → binary vector of
-#     applicable advice items, generalising beyond fixed thresholds.
-# ──────────────────────────────────────────────────────────────────────────────
-
-# ── Master advice catalogue ───────────────────────────────────────────────────
-# Each group maps to ALL advice items it could ever display.
-# The model learns which subset applies at each AQI level.
 
 GROUPS = {
     "Children (0–12 yrs)": [
@@ -170,7 +185,7 @@ GROUPS = {
     ],
 }
 
-# ── AQI category helper ───────────────────────────────────────────────────────
+
 def _aqi_category(aqi):
     if aqi <= 50:   return "Good"
     if aqi <= 100:  return "Satisfactory"
@@ -179,14 +194,9 @@ def _aqi_category(aqi):
     if aqi <= 400:  return "Very Poor"
     return "Severe"
 
-# ── Ground-truth label generator (domain-expert rules → binary vectors) ───────
+
 def _labels_for_group(group, aqi):
-    """
-    Returns a binary list: 1 = advice item applies at this AQI, 0 = does not.
-    This encodes the same domain knowledge as the old if/elif block, but as
-    structured training labels that the ML model learns from.
-    """
-    items = GROUPS[group]
+    items  = GROUPS[group]
     labels = [0] * len(items)
 
     def activate(*phrases):
@@ -225,7 +235,8 @@ def _labels_for_group(group, aqi):
         elif aqi <= 200:
             activate("less than 30 minutes", "N95 or KN95 respirator during commuting")
         elif aqi <= 300:
-            activate("Avoid jogging", "NIOSH-approved N95 respirator during travel", "less than 20 minutes")
+            activate("Avoid jogging", "NIOSH-approved N95 respirator during travel",
+                     "less than 20 minutes")
         elif aqi <= 400:
             activate("Avoid outdoor exercise completely", "tightly fitted N95")
         else:
@@ -247,7 +258,7 @@ def _labels_for_group(group, aqi):
 
     elif group == "Pregnant Women":
         if aqi <= 200:
-            pass  # No specific advice below Moderate
+            pass
         elif aqi <= 300:
             activate("unless necessary", "KN95/N95 respirator if travelling")
         elif aqi <= 400:
@@ -267,7 +278,7 @@ def _labels_for_group(group, aqi):
 
     elif group == "Heart Disease Patients":
         if aqi <= 300:
-            pass  # No specific advice below Poor
+            pass
         elif aqi <= 400:
             activate("Avoid physical exertion", "chest discomfort")
         else:
@@ -275,7 +286,7 @@ def _labels_for_group(group, aqi):
 
     elif group == "Outdoor Workers":
         if aqi <= 300:
-            pass  # No specific advice below Poor
+            pass
         elif aqi <= 400:
             activate("N95/N99 respirator continuously", "20-minute indoor breaks")
         else:
@@ -283,11 +294,8 @@ def _labels_for_group(group, aqi):
 
     return labels
 
-# ── Generate synthetic training dataset ──────────────────────────────────────
-# Sample 2000 AQI values uniformly across the full range.
-# For each AQI, generate ground-truth binary labels per group.
-# The RF model then learns a smooth, continuous mapping.
 
+# ── Train recommendation models ───────────────────────────────────────────────
 np.random.seed(42)
 TRAIN_AQI = np.concatenate([
     np.random.uniform(0,   50,  350),
@@ -298,17 +306,12 @@ TRAIN_AQI = np.concatenate([
     np.random.uniform(400, 500, 250),
 ])
 
-# ── Train one MultiOutputClassifier per group ─────────────────────────────────
 rec_models = {}
-
 for group in GROUPS:
     X_rec = TRAIN_AQI.reshape(-1, 1)
     Y_rec = np.array([_labels_for_group(group, aqi) for aqi in TRAIN_AQI])
-
-    # Skip groups that are never active (all-zero labels)
     if Y_rec.sum() == 0:
         continue
-
     clf = MultiOutputClassifier(
         RandomForestClassifier(
             n_estimators=200,
@@ -326,68 +329,80 @@ print("Recommendation models trained for:", list(rec_models.keys()))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SECTION 3 — PUBLIC API
+# SECTION 3 — PUBLIC API (location-aware)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def predict_aqi(input_datetime):
-    """Predict AQI for a given datetime string using the XGBoost model."""
+def get_model_for_location(location: str):
+    """
+    Return (df_long, aqi_model, y_test, preds) for the requested city.
+    Results are cached so repeated calls don't re-train.
+    """
+    global _model_cache
+    if location not in _model_cache:
+        file_path = LOCATION_FILES.get(location)
+        if file_path is None:
+            raise ValueError(
+                f"Unknown location '{location}'. "
+                f"Available: {list(LOCATION_FILES.keys())}"
+            )
+        _df     = _load_and_prepare(file_path)
+        _model, _Xt, _yt, _p = _train_aqi_model(_df)
+        _model_cache[location] = (_df, _model, _yt, _p)
+    return _model_cache[location]
+
+
+def predict_aqi(input_datetime: str, location: str = "Delhi") -> float:
+    """Predict AQI for a given datetime string and city using the XGBoost model."""
+    df_loc, model_loc, _, _ = get_model_for_location(location)
     input_dt  = pd.to_datetime(input_datetime)
-    last_rows = df_long[df_long["Datetime"] < input_dt].tail(72)
+    last_rows = df_loc[df_loc["Datetime"] < input_dt].tail(72)
 
     if len(last_rows) < 72:
         raise ValueError(
             "Not enough historical data before the given datetime. "
-            "Please choose a later date."
+            "Please choose a later date within the dataset's range."
         )
 
     features = pd.DataFrame({
-        "hour":           [input_dt.hour],
-        "day":            [input_dt.day],
-        "dayofweek":      [input_dt.dayofweek],
-        "lag1":           [last_rows.iloc[-1]["AQI"]],
-        "lag2":           [last_rows.iloc[-2]["AQI"]],
-        "lag24":          [last_rows.iloc[-24]["AQI"]],
-        "lag48":          [last_rows.iloc[-48]["AQI"]],
-        "lag72":          [last_rows.iloc[-72]["AQI"]],
-        "rolling_mean_3": [last_rows.iloc[-3:]["AQI"].mean()],
-        "rolling_mean_6": [last_rows.iloc[-6:]["AQI"].mean()],
-        "rolling_mean_12":[last_rows.iloc[-12:]["AQI"].mean()],
+        "hour":            [input_dt.hour],
+        "day":             [input_dt.day],
+        "dayofweek":       [input_dt.dayofweek],
+        "lag1":            [last_rows.iloc[-1]["AQI"]],
+        "lag2":            [last_rows.iloc[-2]["AQI"]],
+        "lag24":           [last_rows.iloc[-24]["AQI"]],
+        "lag48":           [last_rows.iloc[-48]["AQI"]],
+        "lag72":           [last_rows.iloc[-72]["AQI"]],
+        "rolling_mean_3":  [last_rows.iloc[-3:]["AQI"].mean()],
+        "rolling_mean_6":  [last_rows.iloc[-6:]["AQI"].mean()],
+        "rolling_mean_12": [last_rows.iloc[-12:]["AQI"].mean()],
     })
 
-    return float(aqi_model.predict(features)[0])
+    return float(model_loc.predict(features)[0])
 
 
-def suggest_precautions(aqi):
+def suggest_precautions(aqi: float):
     """
     Returns (category: str, precautions: dict[str, list[str]])
-
-    Uses trained MultiOutputClassifier (Random Forest) per population group
-    to predict which advice items apply at the given AQI level.
-    Falls back gracefully to rule-based labels if a group model is missing.
+    Uses trained MultiOutputClassifier (Random Forest) per population group.
     """
-    category   = _aqi_category(aqi)
+    category    = _aqi_category(aqi)
     precautions = {}
-    aqi_input  = np.array([[aqi]])
+    aqi_input   = np.array([[aqi]])
 
     for group, items in GROUPS.items():
-
         if group in rec_models:
-            # ML prediction: binary vector over all advice items for this group
             pred_labels = rec_models[group].predict(aqi_input)[0]
         else:
-            # Fallback: use rule-based labels directly
             pred_labels = _labels_for_group(group, aqi)
 
         active_advice = [items[i] for i, flag in enumerate(pred_labels) if flag == 1]
-
-        # Only include group if at least one advice item is active
         if active_advice:
             precautions[group] = active_advice
 
     return category, precautions
 
 
-def get_actual_vs_predicted():
-    """Return (actual, predicted) arrays for the test set."""
-
-    return y_test.values, preds
+def get_actual_vs_predicted(location: str = "Delhi"):
+    """Return (actual, predicted) arrays for the test set of the given location."""
+    _, _, yt, p = get_model_for_location(location)
+    return yt.values, p
