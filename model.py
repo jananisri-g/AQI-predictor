@@ -15,6 +15,8 @@ warnings.filterwarnings("ignore")
 LOCATION_FILES = {
     "Delhi":     "delhi_data.xlsx",
     "Bengaluru": "bengaluru_data.xlsx",
+    "Mumbai": "mumbai_data.xlsx",
+    "Kolkata": "kolkata_data.xlsx"
 }
 
 # Cache trained models per location so re-selecting doesn't re-train every time
